@@ -43,3 +43,16 @@ export type InfraClientPluginClass = PluginClass<
   InfraClientSetupDeps,
   InfraClientStartDeps
 >;
+
+export interface StatsAggregation {
+  buckets: Array<{ key: string; doc_count: number }>;
+}
+
+export interface SeriesAggregation {
+  buckets: Array<{
+    key_as_string: string;
+    key: number;
+    doc_count: number;
+    dataset: StatsAggregation;
+  }>;
+}

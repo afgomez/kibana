@@ -4,8 +4,21 @@
  * you may not use this file except in compliance with the Elastic License.
  */
 
-import { InfraClientCoreSetup } from '../types';
+import { SearchParams } from 'elasticsearch';
+
+import {
+  InfraClientCoreSetup,
+  InfraClientStartDeps,
+  StatsAggregation,
+  SeriesAggregation,
+} from '../types';
 import { LogsFetchDataResponse } from '../../../observability/public';
+
+type LogsOverviewStatsAndSeries = Pick<LogsFetchDataResponse, 'stats' | 'series'>;
+interface LogsOverviewAggregations {
+  stats: StatsAggregation;
+  series: SeriesAggregation;
+}
 
 export function getLogsHasDataFetcher(getStartServices: InfraClientCoreSetup['getStartServices']) {
   return async () => {
@@ -30,64 +43,112 @@ export function getLogsOverviewDataFetcher(
 
     // if you need a core dep, we need to pass in more than just getStartServices
 
-    // perform query
+    const { stats, series } = await fetchLogsOverview('now-15m', 'now', data);
+
     return {
       title: 'Log rate',
-      appLink: 'TBD', // TODO: what format should this be in, relative I assume?
-      stats: {
-        nginx: {
-          type: 'number',
-          label: 'nginx',
-          value: 345341,
-        },
-        'elasticsearch.audit': {
-          type: 'number',
-          label: 'elasticsearch.audit',
-          value: 164929,
-        },
-        'haproxy.log': {
-          type: 'number',
-          label: 'haproxy.log',
-          value: 51101,
-        },
-      },
-      // Note: My understanding is that these series coordinates will be
-      // combined into objects that look like:
-      // { x: timestamp, y: value, g: label (e.g. nginx) }
-      // so they fit the stacked bar chart API
-      // https://elastic.github.io/elastic-charts/?path=/story/bar-chart--stacked-with-axis-and-legend
-      series: {
-        nginx: {
-          label: 'nginx',
-          coordinates: [
-            { x: 1593000000000, y: 10014 },
-            { x: 1593000900000, y: 12827 },
-            { x: 1593001800000, y: 2946 },
-            { x: 1593002700000, y: 14298 },
-            { x: 1593003600000, y: 4096 },
-          ],
-        },
-        'elasticsearch.audit': {
-          label: 'elasticsearch.audit',
-          coordinates: [
-            { x: 1593000000000, y: 5676 },
-            { x: 1593000900000, y: 6783 },
-            { x: 1593001800000, y: 2394 },
-            { x: 1593002700000, y: 4554 },
-            { x: 1593003600000, y: 5659 },
-          ],
-        },
-        'haproxy.log': {
-          label: 'haproxy.log',
-          coordinates: [
-            { x: 1593000000000, y: 9085 },
-            { x: 1593000900000, y: 9002 },
-            { x: 1593001800000, y: 3940 },
-            { x: 1593002700000, y: 5451 },
-            { x: 1593003600000, y: 9133 },
-          ],
-        },
-      },
+      appLink: 'lalal', // TODO: what format should this be in, relative I assume?
+      stats,
+      series,
     };
   };
+}
+
+async function fetchLogsOverview(
+  startDate: string,
+  endDate: string,
+  dataPlugin: InfraClientStartDeps['data']
+): Promise<LogsOverviewStatsAndSeries> {
+  const esSearcher = dataPlugin.search.getSearchStrategy('es');
+  return new Promise((resolve, reject) => {
+    esSearcher
+      .search({ params: buildLogsOverviewQuery('filebeat-*', startDate, endDate) })
+      .subscribe(
+        (result) => {
+          if (result.rawResponse.aggregations) {
+            const processedAggregations = processLogsOverview(
+              result.rawResponse.aggregations as LogsOverviewAggregations
+            );
+            resolve(processedAggregations);
+          } else {
+            resolve({ stats: {}, series: {} });
+          }
+        },
+        (error: Error) => reject(error)
+      );
+  });
+}
+
+function buildLogsOverviewQuery(index: string, startDate: string, endDate: string): SearchParams {
+  return {
+    index,
+    body: {
+      size: 0,
+      query: {
+        range: {
+          '@timestamp': {
+            gte: startDate,
+            lte: endDate,
+            format: 'strict_date_optional_time',
+          },
+        },
+      },
+      aggs: {
+        stats: {
+          terms: {
+            field: 'event.dataset',
+            size: 4,
+          },
+        },
+        series: {
+          date_histogram: {
+            field: '@timestamp',
+            fixed_interval: '30s',
+          },
+          aggs: {
+            dataset: {
+              terms: {
+                field: 'event.dataset',
+                size: 4,
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
+function processLogsOverview({
+  stats,
+  series,
+}: LogsOverviewAggregations): LogsOverviewStatsAndSeries {
+  const processedStats = (stats.buckets as any[]).reduce<LogsOverviewStatsAndSeries['stats']>(
+    (result, bucket) => {
+      result[bucket.key] = {
+        type: 'number',
+        label: bucket.key,
+        value: bucket.doc_count,
+      };
+
+      return result;
+    },
+    {}
+  );
+
+  const processedSeries = (series.buckets as any[]).reduce<LogsOverviewStatsAndSeries['series']>(
+    (result, bucket) => {
+      const x = bucket.key; // the timestamp of the bucket
+      bucket.dataset.buckets.forEach((b) => {
+        const label = b.key;
+        result[label] = result[label] || { label, coordinates: [] };
+        result[label].coordinates.push({ x, y: b.doc_count });
+      });
+
+      return result;
+    },
+    {}
+  );
+
+  return { stats: processedStats, series: processedSeries };
 }
